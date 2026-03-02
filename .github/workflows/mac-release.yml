@@ -97,7 +97,9 @@ jobs:
           ALLOW_ADHOC_SIGNING: "1"
           SKIP_TSC: "1"
           SKIP_UI_BUILD: "1"
-        run: bash scripts/package-mac-app.sh
+        run: |
+          chmod +x scripts/codesign-mac-app.sh scripts/package-mac-app.sh scripts/create-dmg.sh
+          bash scripts/package-mac-app.sh
 
       - name: Create DMG
         env:
