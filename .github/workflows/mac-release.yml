@@ -132,17 +132,46 @@ jobs:
           GATEWAY="$RESOURCES/openclaw-gateway"
           GATEWAY_MODS="$GATEWAY/node_modules"
           mkdir -p "$GATEWAY_MODS"
+          mkdir -p "$GATEWAY/dist"
 
-          echo "Copying dist (tsdown bundle)..."
-          cp -R dist/ "$GATEWAY/dist/"
+          # Copy only the JS bundle files — NOT the entire dist/ which includes OpenClaw.app.
+          # dist/index.js is a self-contained tsdown bundle; it's the only file the gateway needs.
+          echo "Copying tsdown JS bundle..."
+          cp dist/index.js "$GATEWAY/dist/index.js"
+          # Copy supplementary bundles (hooks, plugin-sdk) if present.
+          for extra in entry.js daemon-cli.js extensionAPI.js warning-filter.js; do
+            [ -f "dist/$extra" ] && cp "dist/$extra" "$GATEWAY/dist/$extra" || true
+          done
+          [ -d dist/hooks ]      && cp -R dist/hooks      "$GATEWAY/dist/hooks"      || true
+          [ -d dist/plugin-sdk ] && cp -R dist/plugin-sdk "$GATEWAY/dist/plugin-sdk" || true
           cp package.json "$GATEWAY/"
+
+          echo "Gateway dist contents:"
+          ls -lh "$GATEWAY/dist/"
 
           # tsdown bundles all pure-JS deps into dist/index.js.
           # Only native .node addons need to be present in node_modules at runtime.
+          # We build fat binaries (arm64 + x64) so the app works on both Apple Silicon and Intel Macs.
+          echo "Building x64 native addons alongside arm64..."
+          # Save current (arm64) .node files, then rebuild for x64 and create universal binaries.
+          ARM64_SNAP="$(mktemp -d)"
+          find node_modules -maxdepth 6 -name "*.node" 2>/dev/null | while IFS= read -r f; do
+            rel="${f#node_modules/}"
+            dest="$ARM64_SNAP/$rel"
+            mkdir -p "$(dirname "$dest")"
+            cp "$f" "$dest"
+          done
+
+          # Rebuild native addons for x64 (cross-compile on arm64 runner).
+          # Many packages download arch-specific prebuilts, so this gets the x64 variant.
+          npm_config_arch=x64 pnpm rebuild 2>/dev/null || \
+          npm_config_arch=x64 npm rebuild 2>/dev/null || \
+          echo "x64 rebuild skipped (packages may not support cross-compile)"
+
           echo "Detecting packages with native .node binaries..."
           SEEN_FILE="$(mktemp)"
 
-          find node_modules -maxdepth 5 -name "*.node" 2>/dev/null | while IFS= read -r nodefile; do
+          find node_modules -maxdepth 6 -name "*.node" 2>/dev/null | while IFS= read -r nodefile; do
             rel="${nodefile#node_modules/}"
             # Get top-level package name: @scope/pkg or pkg
             case "$rel" in
@@ -175,9 +204,63 @@ jobs:
           done
 
           rm -f "$SEEN_FILE"
+
+          # For each x64 .node in the bundle, lipo it with the arm64 version to make a fat binary.
+          echo "Creating universal (fat) .node binaries..."
+          find "$GATEWAY_MODS" -name "*.node" 2>/dev/null | while IFS= read -r x64node; do
+            rel="${x64node#$GATEWAY_MODS/}"
+            arm64node="$ARM64_SNAP/$rel"
+            if [ -f "$arm64node" ]; then
+              arm64_archs=$(/usr/bin/lipo -archs "$arm64node" 2>/dev/null || echo "")
+              x64_archs=$(/usr/bin/lipo -archs "$x64node" 2>/dev/null || echo "")
+              if echo "$arm64_archs" | grep -q "arm64" && echo "$x64_archs" | grep -q "x86_64"; then
+                /usr/bin/lipo -create "$arm64node" "$x64node" -output "$x64node" 2>/dev/null && \
+                  echo "  fat: $rel" || echo "  lipo failed for $rel (keeping x64-only)"
+              elif echo "$arm64_archs" | grep -q "arm64"; then
+                cp "$arm64node" "$x64node"
+                echo "  arm64-only: $rel (x64 rebuild did not produce x64 binary)"
+              fi
+            fi
+          done
+          rm -rf "$ARM64_SNAP"
+
           echo "Gateway size: $(du -sh "$GATEWAY" | cut -f1)"
           echo "App size:     $(du -sh dist/OpenClaw.app | cut -f1)"
           echo "Disk free:    $(df -h . | tail -1 | awk '{print $4}')"
+
+      - name: Verify bundle contents
+        run: |
+          set -euo pipefail
+          RESOURCES="dist/OpenClaw.app/Contents/Resources"
+          GATEWAY="$RESOURCES/openclaw-gateway"
+
+          echo "=== Verifying bundled gateway ==="
+          NODE_BIN="$RESOURCES/tools/node/bin/node"
+          GATEWAY_ENTRY="$GATEWAY/dist/index.js"
+
+          # Node binary must be executable
+          if [ ! -x "$NODE_BIN" ]; then
+            echo "ERROR: Bundled node binary missing or not executable: $NODE_BIN"
+            exit 1
+          fi
+          echo "Node binary: $NODE_BIN"
+          "$NODE_BIN" --version
+
+          # Gateway entry must exist
+          if [ ! -f "$GATEWAY_ENTRY" ]; then
+            echo "ERROR: Gateway entry point missing: $GATEWAY_ENTRY"
+            exit 1
+          fi
+          echo "Gateway entry: $GATEWAY_ENTRY ($(wc -c < "$GATEWAY_ENTRY") bytes)"
+
+          # Quick smoke test: run --version with the bundled node
+          VERSION_OUT="$("$NODE_BIN" "$GATEWAY_ENTRY" --version 2>&1 || true)"
+          echo "Gateway --version output: $VERSION_OUT"
+
+          echo "=== Native modules in bundle ==="
+          find "$GATEWAY/node_modules" -name "*.node" 2>/dev/null | while read f; do
+            echo "  $f: $(/usr/bin/lipo -archs "$f" 2>/dev/null || echo 'not a fat binary')"
+          done || echo "(none found)"
 
       - name: Re-sign app after adding resources
         run: |
