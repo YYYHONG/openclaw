@@ -62,14 +62,21 @@ jobs:
             --config.enable-pre-post-scripts=true \
             --config.node-linker=hoisted
 
+      - name: Stub a2ui bundle (vendor sources not in git)
+        run: |
+          mkdir -p src/canvas-host/a2ui
+          touch src/canvas-host/a2ui/a2ui.bundle.js
+
       - name: Run JS tests
         if: ${{ !inputs.skip_tests }}
-        run: pnpm canvas:a2ui:bundle && pnpm test:fast
+        run: pnpm test:fast
         env:
           NODE_OPTIONS: --max-old-space-size=4096
 
       - name: Build JS dist
         run: pnpm build
+        env:
+          OPENCLAW_A2UI_SKIP_MISSING: "1"
 
       - name: Build Control UI
         run: node scripts/ui.js build
