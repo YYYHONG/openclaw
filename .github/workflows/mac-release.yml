@@ -1,0 +1,142 @@
+name: Mac Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_archs:
+        description: "Target architectures"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - arm64
+          - x86_64
+      skip_tests:
+        description: "Skip JS unit tests (faster build)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-mac-dmg:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Select Xcode 26.1
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.1.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_16.3.app 2>/dev/null \
+            || sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -version
+          swift --version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          check-latest: true
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm-store-cache
+        with:
+          pnpm-version: "10.23.0"
+          cache-key-suffix: "node22-mac"
+
+      - name: Install dependencies
+        run: |
+          export PATH="$(dirname "$(node -p "process.execPath")"):$PATH"
+          pnpm install --frozen-lockfile --ignore-scripts=false \
+            --config.engine-strict=false \
+            --config.enable-pre-post-scripts=true \
+            --config.node-linker=hoisted \
+          || pnpm install --frozen-lockfile --ignore-scripts=false \
+            --config.engine-strict=false \
+            --config.enable-pre-post-scripts=true \
+            --config.node-linker=hoisted
+
+      - name: Run JS tests
+        if: ${{ !inputs.skip_tests }}
+        run: pnpm canvas:a2ui:bundle && pnpm test:fast
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+
+      - name: Build JS dist
+        run: pnpm build
+
+      - name: Build Control UI
+        run: node scripts/ui.js build
+
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('apps/macos/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+
+      - name: Build macOS app bundle
+        env:
+          BUILD_CONFIG: release
+          BUILD_ARCHS: ${{ inputs.build_archs || 'all' }}
+          BUNDLE_ID: ai.openclaw.mac
+          ALLOW_ADHOC_SIGNING: "1"
+          SKIP_TSC: "1"
+          SKIP_UI_BUILD: "1"
+        run: bash scripts/package-mac-app.sh
+
+      - name: Create DMG
+        env:
+          SKIP_NOTARIZE: "1"
+        run: |
+          APP="dist/OpenClaw.app"
+          VERSION=$(node -p "require('./package.json').version")
+          DMG="dist/OpenClaw-${VERSION}.dmg"
+          bash scripts/create-dmg.sh "$APP" "$DMG"
+          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Create ZIP (for Sparkle / direct download)
+        run: |
+          VERSION="${APP_VERSION}"
+          ZIP="dist/OpenClaw-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "dist/OpenClaw.app" "$ZIP"
+          echo "ZIP_PATH=$ZIP" >> "$GITHUB_ENV"
+
+      - name: Show build artifacts
+        run: |
+          echo "=== Build artifacts ==="
+          ls -lh dist/OpenClaw* || true
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenClaw-${{ env.APP_VERSION }}-mac
+          path: |
+            ${{ env.DMG_PATH }}
+            ${{ env.ZIP_PATH }}
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          echo "## Mac Build Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** \`${APP_VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Architectures:** \`${{ inputs.build_archs || 'all' }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download the artifacts from the **Actions** tab above:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`OpenClaw-${APP_VERSION}.dmg\` — drag-and-drop installer" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`OpenClaw-${APP_VERSION}.zip\` — zip archive" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> **Note:** This is an ad-hoc signed build (no Apple Developer certificate)." >> "$GITHUB_STEP_SUMMARY"
+          echo "> On the target Mac, right-click the app and choose **Open** to bypass Gatekeeper." >> "$GITHUB_STEP_SUMMARY"
