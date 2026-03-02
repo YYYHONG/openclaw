@@ -101,6 +101,65 @@ jobs:
           chmod +x scripts/codesign-mac-app.sh scripts/package-mac-app.sh scripts/create-dmg.sh
           bash scripts/package-mac-app.sh
 
+      - name: Bundle Node.js runtime into app
+        run: |
+          set -euo pipefail
+          NODE_VER="v22.12.0"
+          RESOURCES="dist/OpenClaw.app/Contents/Resources"
+          NODE_DEST="$RESOURCES/tools/node/bin"
+          mkdir -p "$NODE_DEST"
+
+          echo "Downloading Node.js $NODE_VER..."
+          curl -fsSL "https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-darwin-arm64.tar.gz" -o /tmp/node-arm64.tar.gz
+          curl -fsSL "https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-darwin-x64.tar.gz"  -o /tmp/node-x64.tar.gz
+
+          tar -xzf /tmp/node-arm64.tar.gz -C /tmp
+          tar -xzf /tmp/node-x64.tar.gz  -C /tmp
+
+          echo "Creating universal Node.js binary..."
+          /usr/bin/lipo -create \
+            "/tmp/node-$NODE_VER-darwin-arm64/bin/node" \
+            "/tmp/node-$NODE_VER-darwin-x64/bin/node" \
+            -output "$NODE_DEST/node"
+          chmod +x "$NODE_DEST/node"
+
+          echo "Node.js bundled: $("$NODE_DEST/node" --version)"
+
+      - name: Bundle openclaw gateway into app
+        run: |
+          set -euo pipefail
+          RESOURCES="dist/OpenClaw.app/Contents/Resources"
+          GATEWAY="$RESOURCES/openclaw-gateway"
+          mkdir -p "$GATEWAY"
+
+          echo "Copying dist..."
+          cp -R dist/ "$GATEWAY/dist/"
+          cp package.json "$GATEWAY/"
+
+          echo "Copying node_modules (this may take a while)..."
+          cp -R node_modules/ "$GATEWAY/node_modules/"
+
+          echo "Stripping unnecessary files to reduce size..."
+          find "$GATEWAY/node_modules" -type d -name ".cache"        -exec rm -rf {} + 2>/dev/null || true
+          find "$GATEWAY/node_modules" -type d -name "__tests__"     -exec rm -rf {} + 2>/dev/null || true
+          find "$GATEWAY/node_modules" -type d -name "test"          -exec rm -rf {} + 2>/dev/null || true
+          find "$GATEWAY/node_modules" -type d -name "tests"         -exec rm -rf {} + 2>/dev/null || true
+          find "$GATEWAY/node_modules" -name "*.ts"  ! -name "*.d.ts" -delete 2>/dev/null || true
+          find "$GATEWAY/node_modules" -name "*.map"                 -delete 2>/dev/null || true
+          find "$GATEWAY/node_modules" -name "CHANGELOG*"            -delete 2>/dev/null || true
+          find "$GATEWAY/node_modules" -name "LICENCE*"              -delete 2>/dev/null || true
+          # Remove prebuilt binaries for non-macOS platforms
+          find "$GATEWAY/node_modules" -type d -name "linux-*"   -exec rm -rf {} + 2>/dev/null || true
+          find "$GATEWAY/node_modules" -type d -name "win32-*"   -exec rm -rf {} + 2>/dev/null || true
+          find "$GATEWAY/node_modules" -type d -name "android-*" -exec rm -rf {} + 2>/dev/null || true
+
+          echo "Gateway size: $(du -sh "$GATEWAY" | cut -f1)"
+          echo "App size:     $(du -sh dist/OpenClaw.app | cut -f1)"
+
+      - name: Re-sign app after adding resources
+        run: |
+          /usr/bin/codesign --force --deep --sign - dist/OpenClaw.app
+
       - name: Create DMG
         env:
           SKIP_NOTARIZE: "1"

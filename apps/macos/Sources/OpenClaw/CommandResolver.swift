@@ -4,7 +4,35 @@ enum CommandResolver {
     private static let projectRootDefaultsKey = "openclaw.gatewayProjectRootPath"
     private static let helperName = "openclaw"
 
+    // MARK: - Bundled resource helpers
+
+    /// Path to the Node.js binary shipped inside the app bundle.
+    /// Stored at Contents/Resources/tools/node/bin/node.
+    private static func bundledNodeBinPath() -> String? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let nodeBin = resources.appendingPathComponent("tools/node/bin")
+        let nodeExec = nodeBin.appendingPathComponent("node")
+        guard FileManager().isExecutableFile(atPath: nodeExec.path) else { return nil }
+        return nodeBin.path
+    }
+
+    /// Root URL of the gateway bundled inside the app.
+    /// Stored at Contents/Resources/openclaw-gateway.
+    private static func bundledGatewayRoot() -> URL? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let gateway = resources.appendingPathComponent("openclaw-gateway")
+        let entry = gateway.appendingPathComponent("dist/index.js")
+        guard FileManager().isReadableFile(atPath: entry.path) else { return nil }
+        return gateway
+    }
+
+    // MARK: - Gateway entrypoint
+
     static func gatewayEntrypoint(in root: URL) -> String? {
+        // Prefer bundled gateway (enables standalone operation without npm install)
+        if let bundled = bundledGatewayRoot() {
+            return bundled.appendingPathComponent("dist/index.js").path
+        }
         let distEntry = root.appendingPathComponent("dist/index.js").path
         if FileManager().isReadableFile(atPath: distEntry) { return distEntry }
         let openclawEntry = root.appendingPathComponent("openclaw.mjs").path
@@ -85,6 +113,10 @@ enum CommandResolver {
             "/usr/bin",
             "/bin",
         ]
+        // Bundled Node.js takes highest priority — enables standalone operation.
+        if let bundledNode = bundledNodeBinPath() {
+            extras.insert(bundledNode, at: 0)
+        }
         #if DEBUG
         // Dev-only convenience. Avoid project-local PATH hijacking in release builds.
         extras.insert(projectRoot.appendingPathComponent("node_modules/.bin").path, at: 0)
