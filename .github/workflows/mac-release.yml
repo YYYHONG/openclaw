@@ -132,29 +132,43 @@ jobs:
           GATEWAY="$RESOURCES/openclaw-gateway"
           mkdir -p "$GATEWAY"
 
-          echo "Copying dist..."
+          echo "Copying dist (tsdown bundle)..."
           cp -R dist/ "$GATEWAY/dist/"
           cp package.json "$GATEWAY/"
 
-          echo "Copying node_modules (this may take a while)..."
-          cp -R node_modules/ "$GATEWAY/node_modules/"
+          # tsdown bundles all pure-JS deps into dist/index.js.
+          # Only native .node addons need to be in node_modules.
+          echo "Detecting packages with native .node binaries..."
+          GATEWAY_MODS="$GATEWAY/node_modules"
+          mkdir -p "$GATEWAY_MODS"
 
-          echo "Stripping unnecessary files to reduce size..."
-          find "$GATEWAY/node_modules" -type d -name ".cache"        -exec rm -rf {} + 2>/dev/null || true
-          find "$GATEWAY/node_modules" -type d -name "__tests__"     -exec rm -rf {} + 2>/dev/null || true
-          find "$GATEWAY/node_modules" -type d -name "test"          -exec rm -rf {} + 2>/dev/null || true
-          find "$GATEWAY/node_modules" -type d -name "tests"         -exec rm -rf {} + 2>/dev/null || true
-          find "$GATEWAY/node_modules" -name "*.ts"  ! -name "*.d.ts" -delete 2>/dev/null || true
-          find "$GATEWAY/node_modules" -name "*.map"                 -delete 2>/dev/null || true
-          find "$GATEWAY/node_modules" -name "CHANGELOG*"            -delete 2>/dev/null || true
-          find "$GATEWAY/node_modules" -name "LICENCE*"              -delete 2>/dev/null || true
-          # Remove prebuilt binaries for non-macOS platforms
-          find "$GATEWAY/node_modules" -type d -name "linux-*"   -exec rm -rf {} + 2>/dev/null || true
-          find "$GATEWAY/node_modules" -type d -name "win32-*"   -exec rm -rf {} + 2>/dev/null || true
-          find "$GATEWAY/node_modules" -type d -name "android-*" -exec rm -rf {} + 2>/dev/null || true
+          declare -A SEEN
+          while IFS= read -r nodefile; do
+            rel="${nodefile#node_modules/}"
+            # Determine top-level package name (@scope/pkg or pkg)
+            if [[ "$rel" == @*/* ]]; then
+              IFS='/' read -ra parts <<< "$rel"
+              pkg="${parts[0]}/${parts[1]}"
+            else
+              pkg="${rel%%/*}"
+            fi
+            if [[ -z "${SEEN[$pkg]+x}" ]]; then
+              SEEN["$pkg"]=1
+              src="node_modules/$pkg"
+              if [[ -d "$src" ]]; then
+                scope_dir="$(dirname "$pkg")"
+                if [[ "$scope_dir" != "." ]]; then
+                  mkdir -p "$GATEWAY_MODS/$scope_dir"
+                fi
+                echo "  + $pkg"
+                cp -R "$src" "$GATEWAY_MODS/$scope_dir/"
+              fi
+            fi
+          done < <(find node_modules -maxdepth 5 -name "*.node" 2>/dev/null)
 
           echo "Gateway size: $(du -sh "$GATEWAY" | cut -f1)"
           echo "App size:     $(du -sh dist/OpenClaw.app | cut -f1)"
+          echo "Disk free:    $(df -h . | tail -1 | awk '{print $4}')"
 
       - name: Re-sign app after adding resources
         run: |
