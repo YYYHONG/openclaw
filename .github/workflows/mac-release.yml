@@ -130,42 +130,51 @@ jobs:
           set -euo pipefail
           RESOURCES="dist/OpenClaw.app/Contents/Resources"
           GATEWAY="$RESOURCES/openclaw-gateway"
-          mkdir -p "$GATEWAY"
+          GATEWAY_MODS="$GATEWAY/node_modules"
+          mkdir -p "$GATEWAY_MODS"
 
           echo "Copying dist (tsdown bundle)..."
           cp -R dist/ "$GATEWAY/dist/"
           cp package.json "$GATEWAY/"
 
           # tsdown bundles all pure-JS deps into dist/index.js.
-          # Only native .node addons need to be in node_modules.
+          # Only native .node addons need to be present in node_modules at runtime.
           echo "Detecting packages with native .node binaries..."
-          GATEWAY_MODS="$GATEWAY/node_modules"
-          mkdir -p "$GATEWAY_MODS"
+          SEEN_FILE="$(mktemp)"
 
-          declare -A SEEN
-          while IFS= read -r nodefile; do
+          find node_modules -maxdepth 5 -name "*.node" 2>/dev/null | while IFS= read -r nodefile; do
             rel="${nodefile#node_modules/}"
-            # Determine top-level package name (@scope/pkg or pkg)
-            if [[ "$rel" == @*/* ]]; then
-              IFS='/' read -ra parts <<< "$rel"
-              pkg="${parts[0]}/${parts[1]}"
-            else
-              pkg="${rel%%/*}"
-            fi
-            if [[ -z "${SEEN[$pkg]+x}" ]]; then
-              SEEN["$pkg"]=1
-              src="node_modules/$pkg"
-              if [[ -d "$src" ]]; then
-                scope_dir="$(dirname "$pkg")"
-                if [[ "$scope_dir" != "." ]]; then
-                  mkdir -p "$GATEWAY_MODS/$scope_dir"
-                fi
-                echo "  + $pkg"
-                cp -R "$src" "$GATEWAY_MODS/$scope_dir/"
-              fi
-            fi
-          done < <(find node_modules -maxdepth 5 -name "*.node" 2>/dev/null)
+            # Get top-level package name: @scope/pkg or pkg
+            case "$rel" in
+              @*/*)
+                scope="${rel%%/*}"
+                rest="${rel#*/}"
+                name="${rest%%/*}"
+                pkg="$scope/$name"
+                ;;
+              *)
+                pkg="${rel%%/*}"
+                ;;
+            esac
 
+            # Skip if already processed
+            if grep -qxF "$pkg" "$SEEN_FILE" 2>/dev/null; then
+              continue
+            fi
+            echo "$pkg" >> "$SEEN_FILE"
+
+            src="node_modules/$pkg"
+            if [ -d "$src" ]; then
+              scope_dir="$(dirname "$pkg")"
+              if [ "$scope_dir" != "." ]; then
+                mkdir -p "$GATEWAY_MODS/$scope_dir"
+              fi
+              echo "  + $pkg"
+              cp -R "$src" "$GATEWAY_MODS/$scope_dir/"
+            fi
+          done
+
+          rm -f "$SEEN_FILE"
           echo "Gateway size: $(du -sh "$GATEWAY" | cut -f1)"
           echo "App size:     $(du -sh dist/OpenClaw.app | cut -f1)"
           echo "Disk free:    $(df -h . | tail -1 | awk '{print $4}')"
