@@ -202,6 +202,12 @@ jobs:
           done
           rm -rf "$ARM64_SNAP"
 
+          # Free up workspace node_modules now — they have been copied into the gateway
+          # bundle and are no longer needed. Removing them early saves ~1-2 GB before
+          # the hdiutil convert step, which needs room for both the RW and final DMG.
+          echo "Removing workspace node_modules to free disk space..."
+          rm -rf "$WORKSPACE/node_modules"
+
           echo "Gateway size: $(du -sh "$GATEWAY" | cut -f1)"
           echo "App size:     $(du -sh dist/OpenClaw.app | cut -f1)"
           echo "Disk free:    $(df -h . | tail -1 | awk '{print $4}')"
@@ -243,6 +249,20 @@ jobs:
       - name: Re-sign app after adding resources
         run: |
           /usr/bin/codesign --force --deep --sign - dist/OpenClaw.app
+
+      - name: Free disk space before DMG creation
+        run: |
+          set -euo pipefail
+          echo "=== Disk usage before cleanup ==="
+          df -h .
+          # DerivedData is no longer needed after the Swift build.
+          rm -rf ~/Library/Developer/Xcode/DerivedData 2>/dev/null || true
+          # Downloaded Node.js tarballs used for the bundled runtime.
+          rm -f /tmp/node-*.tar.gz 2>/dev/null || true
+          # Prune the pnpm content-addressable store of unreferenced blobs.
+          pnpm store prune --force 2>/dev/null || true
+          echo "=== Disk usage after cleanup ==="
+          df -h .
 
       - name: Create DMG
         env:

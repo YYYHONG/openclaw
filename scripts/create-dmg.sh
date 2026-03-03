@@ -169,7 +169,7 @@ if [[ "$MIN_SECTORS" =~ ^[0-9]+$ ]] && [[ "$DMG_EXTRA_SECTORS" =~ ^[0-9]+$ ]]; t
   hdiutil resize -sectors "$TARGET_SECTORS" "$DMG_RW_PATH" >/dev/null 2>&1 || true
 fi
 
-hdiutil convert "$DMG_RW_PATH" -format ULMO -o "$OUT_PATH" -ov
+hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=6 -o "$OUT_PATH" -ov
 rm -f "$DMG_RW_PATH"
 
 hdiutil verify "$OUT_PATH" >/dev/null
