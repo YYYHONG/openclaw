@@ -133,9 +133,8 @@ jobs:
           GATEWAY="$RESOURCES/openclaw-gateway"
           mkdir -p "$GATEWAY/dist"
 
-          # Copy only the JS bundle files — NOT the entire dist/ which includes OpenClaw.app.
-          # tsdown with platform:"node" leaves ALL node_modules external, so we also need
-          # the full production node_modules tree (installed below).
+          # Copy JS bundle files (tsdown with platform:"node" externalizes all node_modules,
+          # so we must also bundle the full production node_modules tree below).
           echo "Copying tsdown JS bundle..."
           cp dist/index.js "$GATEWAY/dist/index.js"
           for extra in entry.js daemon-cli.js extensionAPI.js warning-filter.js; do
@@ -148,49 +147,43 @@ jobs:
           echo "Gateway dist contents:"
           ls -lh "$GATEWAY/dist/"
 
-          # Install ALL production dependencies into a temp directory, then copy to the bundle.
-          # The pnpm store is already populated from the earlier install step, so this is fast.
-          echo "Installing production node_modules for gateway runtime..."
-          PROD_DIR="$(mktemp -d)"
-          cp "$WORKSPACE/package.json" "$PROD_DIR/"
-          cp "$WORKSPACE/pnpm-lock.yaml" "$PROD_DIR/" 2>/dev/null || true
+          # Reuse the workspace node_modules (already fully installed with all scripts,
+          # so native prebuilt binaries are correctly downloaded/compiled for arm64).
+          # Prune devDependencies using npm, then copy the result into the gateway bundle.
+          echo "Staging production node_modules from workspace install..."
+          STAGING="$(mktemp -d)"
+          cp package.json "$STAGING/"
+          [ -f pnpm-lock.yaml ] && cp pnpm-lock.yaml "$STAGING/" || true
 
-          (cd "$PROD_DIR" && \
-            pnpm install \
-              --prod \
-              --ignore-scripts \
-              --no-frozen-lockfile \
-              --config.engine-strict=false \
-              --config.node-linker=hoisted \
-              2>&1 | tail -10) || \
-          echo "Warning: prod install had issues; bundle may be missing some JS deps"
+          echo "Copying workspace node_modules to staging..."
+          cp -R node_modules "$STAGING/"
+          echo "Staging size before prune: $(du -sh "$STAGING/node_modules" | cut -f1)"
 
-          if [ ! -d "$PROD_DIR/node_modules" ]; then
-            echo "ERROR: prod node_modules was not created"
-            exit 1
-          fi
-          echo "Prod node_modules size: $(du -sh "$PROD_DIR/node_modules" | cut -f1)"
+          echo "Pruning devDependencies..."
+          (cd "$STAGING" && npm prune --production 2>&1 | tail -5) || \
+            echo "npm prune warning (non-fatal)"
+          echo "Staging size after prune:  $(du -sh "$STAGING/node_modules" | cut -f1)"
 
-          # Now rebuild native addons for x64 inside the prod dir so we can lipo them.
+          # Snapshot arm64 native binaries before x64 rebuild.
           ARM64_SNAP="$(mktemp -d)"
-          find "$PROD_DIR/node_modules" -maxdepth 6 -name "*.node" 2>/dev/null | \
+          find "$STAGING/node_modules" -name "*.node" 2>/dev/null | \
           while IFS= read -r f; do
-            rel="${f#$PROD_DIR/node_modules/}"
+            rel="${f#$STAGING/node_modules/}"
             dest="$ARM64_SNAP/$rel"
             mkdir -p "$(dirname "$dest")"
             cp "$f" "$dest"
           done
 
-          echo "Rebuilding native addons for x64..."
-          (cd "$PROD_DIR" && npm_config_arch=x64 pnpm rebuild 2>/dev/null) || \
-          (cd "$PROD_DIR" && npm_config_arch=x64 npm rebuild 2>/dev/null) || \
-          echo "x64 rebuild skipped (no cross-compile support)"
+          echo "Rebuilding native addons for x64 (for Intel Mac support)..."
+          (cd "$STAGING" && npm_config_arch=x64 pnpm rebuild 2>/dev/null) || \
+          (cd "$STAGING" && npm_config_arch=x64 npm rebuild 2>/dev/null) || \
+          echo "x64 rebuild skipped"
 
-          # Copy prod node_modules into the gateway bundle.
-          cp -R "$PROD_DIR/node_modules" "$GATEWAY/"
-          rm -rf "$PROD_DIR"
+          # Move pruned node_modules into the gateway bundle.
+          cp -R "$STAGING/node_modules" "$GATEWAY/"
+          rm -rf "$STAGING"
 
-          # For each .node in the bundle, lipo arm64 + x64 into a universal binary.
+          # Lipo arm64 + x64 .node files into universal fat binaries.
           echo "Creating universal (fat) .node binaries..."
           find "$GATEWAY/node_modules" -name "*.node" 2>/dev/null | while IFS= read -r x64node; do
             rel="${x64node#$GATEWAY/node_modules/}"
