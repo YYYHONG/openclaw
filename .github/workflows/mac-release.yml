@@ -149,39 +149,53 @@ jobs:
 
           # Reuse the workspace node_modules (already fully installed with all scripts,
           # so native prebuilt binaries are correctly downloaded/compiled for arm64).
-          # Prune devDependencies using npm, then copy the result into the gateway bundle.
-          echo "Staging production node_modules from workspace install..."
-          STAGING="$(mktemp -d)"
-          cp package.json "$STAGING/"
-          [ -f pnpm-lock.yaml ] && cp pnpm-lock.yaml "$STAGING/" || true
-
-          echo "Copying workspace node_modules to staging..."
-          cp -R node_modules "$STAGING/"
-          echo "Staging size before prune: $(du -sh "$STAGING/node_modules" | cut -f1)"
-
-          echo "Pruning devDependencies..."
-          (cd "$STAGING" && npm prune --production 2>&1 | tail -5) || \
-            echo "npm prune warning (non-fatal)"
-          echo "Staging size after prune:  $(du -sh "$STAGING/node_modules" | cut -f1)"
-
-          # Snapshot arm64 native binaries before x64 rebuild.
+          # We snapshot arm64 .node binaries first, then use pnpm to create a fresh
+          # production-only install in a temp dir (scripts enabled so native packages
+          # download their prebuilts), then lipo for universal binaries.
+          echo "Snapshotting arm64 native binaries from workspace install..."
           ARM64_SNAP="$(mktemp -d)"
-          find "$STAGING/node_modules" -name "*.node" 2>/dev/null | \
+          find node_modules -maxdepth 6 -name "*.node" 2>/dev/null | \
           while IFS= read -r f; do
-            rel="${f#$STAGING/node_modules/}"
+            rel="${f#node_modules/}"
             dest="$ARM64_SNAP/$rel"
             mkdir -p "$(dirname "$dest")"
             cp "$f" "$dest"
           done
 
-          echo "Rebuilding native addons for x64 (for Intel Mac support)..."
-          (cd "$STAGING" && npm_config_arch=x64 pnpm rebuild 2>/dev/null) || \
-          (cd "$STAGING" && npm_config_arch=x64 npm rebuild 2>/dev/null) || \
+          # Install production-only deps into a temp dir.
+          # Scripts are enabled so packages like sharp/sqlite-vec download their prebuilts.
+          # pnpm store is already warm from the earlier install step — this is fast.
+          echo "Installing production node_modules (pnpm --prod, scripts enabled)..."
+          PROD_DIR="$(mktemp -d)"
+          cp "$WORKSPACE/package.json" "$PROD_DIR/"
+          cp "$WORKSPACE/pnpm-lock.yaml" "$PROD_DIR/" 2>/dev/null || true
+
+          (cd "$PROD_DIR" && \
+            pnpm install \
+              --prod \
+              --no-frozen-lockfile \
+              --config.engine-strict=false \
+              --config.node-linker=hoisted \
+              2>&1 | tail -10) || \
+          echo "WARNING: prod install had issues"
+
+          if [ ! -d "$PROD_DIR/node_modules" ]; then
+            echo "ERROR: prod node_modules was not created"
+            exit 1
+          fi
+          echo "Prod node_modules size: $(du -sh "$PROD_DIR/node_modules" | cut -f1)"
+
+          # For .node files that the prod install downloaded (arm64), replace with the
+          # arm64 snapshot to ensure we have the correct pre-built binaries, then rebuild
+          # for x64 and lipo into fat binaries.
+          echo "Rebuilding native addons for x64 (Intel Mac support)..."
+          (cd "$PROD_DIR" && npm_config_arch=x64 pnpm rebuild 2>/dev/null) || \
+          (cd "$PROD_DIR" && npm_config_arch=x64 npm rebuild 2>/dev/null) || \
           echo "x64 rebuild skipped"
 
-          # Move pruned node_modules into the gateway bundle.
-          cp -R "$STAGING/node_modules" "$GATEWAY/"
-          rm -rf "$STAGING"
+          # Copy prod node_modules into the gateway bundle.
+          cp -R "$PROD_DIR/node_modules" "$GATEWAY/"
+          rm -rf "$PROD_DIR"
 
           # Lipo arm64 + x64 .node files into universal fat binaries.
           echo "Creating universal (fat) .node binaries..."
